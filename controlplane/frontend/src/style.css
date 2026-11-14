@@ -1,0 +1,39 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #182b2b;
+  background: #edf2f0;
+  font-synthesis: none;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 970px; margin: 0 auto; padding: 54px 24px; }
+.page-heading { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+h1 { margin: 0; font-size: clamp(1.8rem, 6vw, 2.7rem); letter-spacing: -.045em; }
+h2 { font-size: 1.1rem; margin: 0 0 15px; }
+p { margin: 8px 0 0; }
+.page-heading p, .subtle, small { color: #536865; }
+code { background: #dce9e5; padding: 6px 10px; border-radius: 5px; }
+.columns { display: grid; grid-template-columns: 1fr 1.25fr; gap: 16px; margin-bottom: 16px; }
+section { background: #fff; border: 1px solid #d3e0dc; border-radius: 12px; padding: 22px; min-width: 0; }
+.service { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 0; border-top: 1px solid #e1eae6; }
+.service:last-child { padding-bottom: 0; }
+.service .subtle { font-size: .84rem; margin-top: 4px; }
+.online { color: #176443; }
+form { display: flex; flex-wrap: wrap; gap: 12px; }
+label { display: grid; gap: 6px; font-size: .87rem; flex: 1 1 90px; }
+input, button { font: inherit; border: 1px solid #afc2bd; border-radius: 6px; padding: 7px 11px; }
+input { min-width: 0; }
+button { background: #f3f7f6; color: inherit; cursor: pointer; }
+button:enabled:hover { background: #dfede9; }
+button:disabled { cursor: default; opacity: .55; }
+:focus-visible { outline: 2px solid #247968; outline-offset: 3px; }
+button.primary { background: #126658; border-color: #126658; color: white; }
+button.primary:enabled:hover { background: #0a4c41; }
+.actions { flex-basis: 100%; display: flex; gap: 8px; }
+.run-state { text-transform: capitalize; color: #536865; margin-top: 14px; }
+.error { background: #fce7e3; color: #861e19; border-radius: 6px; padding: 10px; margin-bottom: 12px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; margin: 14px 0 0; }
+.stats > div { background: #f0f6f4; border-radius: 6px; padding: 10px; }
+dt { color: #536865; font-size: .8rem; }
+dd { margin: 4px 0 0; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@media (max-width: 650px) { .columns { grid-template-columns: 1fr; } main { padding: 28px 16px; } }

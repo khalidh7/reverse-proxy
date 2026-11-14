@@ -1,0 +1,6 @@
+listen = "127.0.0.1:8080"
+management_listen = "127.0.0.1:9080"
+upstream = "http://127.0.0.1:3001"
+max_connections = 512
+upstream_timeout_ms = 5000
+shutdown_timeout_ms = 10000

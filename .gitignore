@@ -1,0 +1,4 @@
+/target/
+/controlplane/frontend/node_modules/
+/controlplane/frontend/dist/
+.DS_Store
