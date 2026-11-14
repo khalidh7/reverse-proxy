@@ -1,0 +1,58 @@
+x-app: &app
+  image: reverse-proxy-lab-appserver
+  init: true
+  build:
+    context: .
+    target: appserver
+  environment:
+    LAB_CONTAINER: "1"
+
+services:
+  proxy:
+    image: reverse-proxy-lab-proxy
+    build:
+      context: .
+      target: proxy
+    ports:
+      - "127.0.0.1:8080:8080"
+    stop_grace_period: 12s
+    depends_on:
+      - app-1
+      - app-2
+      - app-3
+
+  app-1:
+    <<: *app
+    command: ["app-1", "0.0.0.0:3001", "0.0.0.0:9301"]
+
+  app-2:
+    <<: *app
+    command: ["app-2", "0.0.0.0:3002", "0.0.0.0:9302"]
+
+  app-3:
+    <<: *app
+    command: ["app-3", "0.0.0.0:3003", "0.0.0.0:9303"]
+
+  controlplane:
+    image: reverse-proxy-lab-controlplane
+    build:
+      context: .
+      target: controlplane
+    init: true
+    environment:
+      LAB_CONTAINER: "1"
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - proxy
+
+  client:
+    image: reverse-proxy-lab-client
+    init: true
+    build:
+      context: .
+      target: client
+    profiles: ["tools"]
+    command: ["http://proxy:8080/", "1000", "16"]
+    depends_on:
+      - proxy
