@@ -14,8 +14,6 @@ use tokio::{
     time::timeout,
 };
 
-pub const PROXY_DATA: &str = "http://127.0.0.1:8080/";
-
 #[derive(Clone, Copy, Serialize)]
 pub struct Service {
     pub id: &'static str,
@@ -67,6 +65,7 @@ pub enum Run {
 pub struct Supervisor {
     binary_dir: PathBuf,
     root: PathBuf,
+    container: bool,
     inner: Mutex<Inner>,
 }
 
@@ -85,10 +84,11 @@ pub enum ProcessState {
 }
 
 impl Supervisor {
-    pub fn new(binary_dir: PathBuf, root: PathBuf) -> Self {
+    pub fn new(binary_dir: PathBuf, root: PathBuf, container: bool) -> Self {
         Self {
             binary_dir,
             root,
+            container,
             inner: Mutex::new(Inner {
                 services: std::array::from_fn(|_| None),
                 client_stop: None,
@@ -98,6 +98,9 @@ impl Supervisor {
     }
 
     pub async fn start_service(self: &std::sync::Arc<Self>, id: &str) -> Result<(), ApiError> {
+        if self.container {
+            return Err(conflict("use Docker Compose to manage services"));
+        }
         let (index, service) = service(id)?;
         let mut inner = self.inner.lock().await;
         if inner.services[index].is_some() {
@@ -165,7 +168,11 @@ impl Supervisor {
         let mut child = self
             .command("client")
             .args([
-                PROXY_DATA,
+                if self.container {
+                    "http://proxy:8080/"
+                } else {
+                    "http://127.0.0.1:8080/"
+                },
                 &workload.requests.to_string(),
                 &workload.concurrency.to_string(),
             ])

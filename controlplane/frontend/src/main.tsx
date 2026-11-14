@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 
@@ -34,10 +34,29 @@ type Workload =
   | { state: 'failed'; message: string }
   | { state: 'completed'; result: Report };
 
+type Algorithm = 'round_robin' | 'least_active';
+
+type Upstream = {
+  id: string;
+  origin: string;
+  enabled: boolean;
+  healthy: boolean;
+  active_requests: number;
+  requests: number;
+};
+
+type Routing = {
+  version: number;
+  algorithm: Algorithm;
+  upstreams: Upstream[];
+};
+
 type Snapshot = {
   services: Service[];
   workload: Workload;
   proxy_metrics: Metrics | null;
+  routing: Routing | null;
+  service_controls: boolean;
 };
 
 const labels: Record<string, string> = {
@@ -55,15 +74,18 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [requests, setRequests] = useState('1000');
   const [concurrency, setConcurrency] = useState('16');
+  const routingRevision = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
+      const revision = routingRevision.current;
       try {
         const response = await fetch('/api/status', { signal: controller.signal, cache: 'no-store' });
         if (!response.ok) throw new Error('Control plane status is unavailable.');
-        setSnapshot(await response.json());
+        const incoming: Snapshot = await response.json();
+        if (revision === routingRevision.current) setSnapshot(incoming);
         setConnectionError('');
       } catch {
         if (!controller.signal.aborted) setConnectionError('Cannot reach the control plane.');
@@ -78,16 +100,21 @@ function App() {
     };
   }, []);
 
-  async function command(path: string, body?: object) {
+  async function command(path: string, body?: object, method = 'POST') {
     setActionError('');
     setBusy(true);
     try {
       const response = await fetch(path, {
-        method: 'POST',
+        method,
         headers: body ? { 'Content-Type': 'application/json' } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
       if (!response.ok) throw new Error(await response.text());
+      if (path === '/api/routing' || path === '/api/routing/clear-counts') {
+        const routing: Routing = await response.json();
+        routingRevision.current += 1;
+        setSnapshot(current => current && { ...current, routing });
+      }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Command failed.');
     } finally {
@@ -104,6 +131,16 @@ function App() {
   const active = run?.state === 'running' || run?.state === 'stopping';
   const disabled = busy || Boolean(connectionError);
   const metrics = snapshot?.proxy_metrics;
+  const routing = snapshot?.routing;
+
+  function updateRouting(algorithm: Algorithm, upstreams: Upstream[]) {
+    if (!routing) return;
+    void command('/api/routing', {
+      version: routing.version,
+      algorithm,
+      enabled_upstreams: upstreams.filter(upstream => upstream.enabled).map(upstream => upstream.id),
+    }, 'PUT');
+  }
 
   return (
     <main>
@@ -129,12 +166,12 @@ function App() {
                     service.process === 'running' ? 'Starting' : 'Offline'}
                 </span></div>
               </div>
-              {service.online && service.process === 'unmanaged' ? <small>External</small> :
+              {snapshot.service_controls && (service.online && service.process === 'unmanaged' ? <small>External</small> :
                 <button type="button" disabled={disabled || service.process === 'stopping'}
                   aria-label={`${service.process === 'running' ? 'Stop' : 'Start'} ${labels[service.id]}`}
                   onClick={() => void command(`/api/services/${service.id}/${service.process === 'running' ? 'stop' : 'start'}`)}>
                   {service.process === 'unmanaged' ? 'Start' : 'Stop'}
-                </button>}
+                </button>)}
             </div>
           ))}
         </section>
@@ -168,6 +205,46 @@ function App() {
           ]} />}
         </section>
       </div>
+      <section className="routing" aria-labelledby="routing-title">
+        <div className="routing-heading">
+          <h2 id="routing-title">Upstream routing</h2>
+          <button type="button"
+            disabled={disabled || active || !routing?.upstreams.some(upstream => upstream.requests > 0)}
+            onClick={() => void command('/api/routing/clear-counts')}>
+            Clear routed counts
+          </button>
+        </div>
+        {routing ? <>
+          <label className="algorithm">Algorithm
+            <select value={routing.algorithm} disabled={disabled}
+              onChange={event => updateRouting(event.target.value as Algorithm, routing.upstreams)}>
+              <option value="round_robin">Round robin</option>
+              <option value="least_active">Least active requests</option>
+            </select>
+          </label>
+          <div className="table-scroll">
+            <table>
+              <thead><tr><th scope="col">Upstream</th><th scope="col">Health</th>
+                <th scope="col">Active</th><th scope="col">Routed</th><th scope="col">Enabled</th></tr></thead>
+              <tbody>{routing.upstreams.map(upstream => <tr key={upstream.id}>
+                <th scope="row" title={upstream.origin}>{upstream.id}</th>
+                <td className={upstream.healthy ? 'online' : 'subtle'}>
+                  {upstream.healthy ? 'Healthy' : 'Unavailable'}
+                </td>
+                <td>{number.format(upstream.active_requests)}</td>
+                <td>{number.format(upstream.requests)}</td>
+                <td><input type="checkbox" aria-label={`Enable ${upstream.id}`}
+                  checked={upstream.enabled} disabled={disabled}
+                  onChange={event => {
+                    const enabled = event.target.checked;
+                    updateRouting(routing.algorithm, routing.upstreams.map(candidate =>
+                      candidate.id === upstream.id ? { ...candidate, enabled } : candidate));
+                  }} /></td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </> : <p className="subtle">Waiting for proxy routing status.</p>}
+      </section>
       <section aria-labelledby="metrics-title">
         <h2 id="metrics-title">Proxy metrics</h2>
         {metrics ? <Stats items={[

@@ -1,0 +1,21 @@
+listen = "0.0.0.0:8080"
+management_listen = "0.0.0.0:9080"
+allow_non_loopback_management = true
+max_connections = 512
+upstream_timeout_ms = 5000
+shutdown_timeout_ms = 10000
+health_interval_ms = 1000
+health_timeout_ms = 500
+algorithm = "round_robin"
+
+[[upstreams]]
+id = "app-1"
+origin = "http://app-1:3001"
+
+[[upstreams]]
+id = "app-2"
+origin = "http://app-2:3002"
+
+[[upstreams]]
+id = "app-3"
+origin = "http://app-3:3003"

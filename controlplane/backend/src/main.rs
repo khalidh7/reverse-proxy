@@ -5,15 +5,16 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Path, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use client::Workload;
-use http_body_util::{BodyExt, Empty, Limited};
-use hyper::{Uri, body::Bytes};
+use http_body_util::{BodyExt, Limited};
+use hyper::Uri;
 use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::{TokioExecutor, TokioTimer},
@@ -22,13 +23,14 @@ use serde_json::{Value, json};
 use supervisor::{ApiError, SERVICES, Supervisor};
 use tokio::{net::TcpListener, signal, time::timeout};
 
-type HttpClient = Client<HttpConnector, Empty<Bytes>>;
+type HttpClient = Client<HttpConnector, Body>;
 
 #[derive(Clone)]
 struct App {
     supervisor: Arc<Supervisor>,
     assets: PathBuf,
     http: HttpClient,
+    container: bool,
 }
 
 #[tokio::main]
@@ -44,15 +46,22 @@ async fn main() -> Result<()> {
         .parent()
         .context("locate sibling binaries")?
         .to_path_buf();
+    let container = std::env::var_os("LAB_CONTAINER").is_some();
     let app = App {
-        supervisor: Arc::new(Supervisor::new(binary_dir, root.clone())),
+        supervisor: Arc::new(Supervisor::new(binary_dir, root.clone(), container)),
         assets: root.join("controlplane/frontend/dist"),
+        container,
         http: Client::builder(TokioExecutor::new())
             .pool_timer(TokioTimer::new())
             .build_http(),
     };
-    let listener = TcpListener::bind("127.0.0.1:9090").await?;
-    let host = listener.local_addr()?.to_string();
+    let listener = TcpListener::bind(if container {
+        "0.0.0.0:9090"
+    } else {
+        "127.0.0.1:9090"
+    })
+    .await?;
+    let host = "127.0.0.1:9090";
     let origin = format!("http://{host}");
     let router = Router::new()
         .route("/", get(|| async { axum::response::Html(include_str!("../../frontend/index.html")) }))
@@ -63,13 +72,15 @@ async fn main() -> Result<()> {
             asset(app, "main.css", "text/css").await
         }))
         .route("/api/status", get(status))
+        .route("/api/routing", put(update_routing))
+        .route("/api/routing/clear-counts", post(clear_routed_counts))
         .route("/api/services/{id}/start", post(start_service))
         .route("/api/services/{id}/stop", post(stop_service))
         .route("/api/workload/start", post(start_workload))
         .route("/api/workload/stop", post(stop_workload))
         .layer(DefaultBodyLimit::max(4096))
         .layer(middleware::from_fn(move |request: Request, next: Next| {
-            let valid = request.headers().get(header::HOST).is_some_and(|value| value == host.as_str())
+            let valid = request.headers().get(header::HOST).is_some_and(|value| value == host)
                 && request.headers().get(header::ORIGIN).is_none_or(|value| value == origin.as_str());
             async move {
                 if !valid {
@@ -105,11 +116,12 @@ async fn asset(app: App, name: &'static str, content_type: &'static str) -> Resp
 }
 
 async fn status(State(app): State<App>) -> Json<Value> {
-    let (metrics, app1, app2, app3) = tokio::join!(
-        probe(&app.http, SERVICES[0].management_port, true),
-        probe(&app.http, SERVICES[1].management_port, false),
-        probe(&app.http, SERVICES[2].management_port, false),
-        probe(&app.http, SERVICES[3].management_port, false),
+    let (metrics, routing, app1, app2, app3) = tokio::join!(
+        probe(&app, 0, "/metrics", true),
+        probe(&app, 0, "/routing", true),
+        probe(&app, 1, "/health", false),
+        probe(&app, 2, "/health", false),
+        probe(&app, 3, "/health", false),
     );
     let (workload, processes) = app.supervisor.snapshot().await;
     let online = [
@@ -130,23 +142,36 @@ async fn status(State(app): State<App>) -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "services": services, "workload": workload, "proxy_metrics": metrics }))
+    Json(json!({
+        "services": services, "workload": workload, "proxy_metrics": metrics,
+        "routing": routing, "service_controls": !app.container,
+    }))
 }
 
-async fn probe(client: &HttpClient, port: u16, metrics: bool) -> Option<Value> {
-    let path = if metrics { "/metrics" } else { "/health" };
-    let url = format!("http://127.0.0.1:{port}{path}");
+fn management_uri(app: &App, index: usize, path: &str) -> Uri {
+    let service = SERVICES[index];
+    let host = if app.container {
+        service.id
+    } else {
+        "127.0.0.1"
+    };
+    format!("http://{host}:{}{path}", service.management_port)
+        .parse()
+        .expect("fixed management URI")
+}
+
+async fn probe(app: &App, index: usize, path: &str, json: bool) -> Option<Value> {
     timeout(Duration::from_millis(750), async {
-        let mut response = client.get(url.parse::<Uri>().ok()?).await.ok()?;
+        let response = app.http.get(management_uri(app, index, path)).await.ok()?;
         if !response.status().is_success() {
             return None;
         }
-        let bytes = Limited::new(response.body_mut(), 4096)
+        let bytes = Limited::new(response.into_body(), 16_384)
             .collect()
             .await
             .ok()?
             .to_bytes();
-        if metrics {
+        if json {
             serde_json::from_slice(&bytes).ok()
         } else {
             Some(Value::Bool(true))
@@ -155,6 +180,45 @@ async fn probe(client: &HttpClient, port: u16, metrics: bool) -> Option<Value> {
     .await
     .ok()
     .flatten()
+}
+
+async fn update_routing(
+    State(app): State<App>,
+    Json(update): Json<Value>,
+) -> Result<Response, ApiError> {
+    let request = hyper::Request::put(management_uri(&app, 0, "/routing"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(update.to_string()))
+        .expect("valid routing request");
+    send_routing_command(&app, request).await
+}
+
+async fn clear_routed_counts(State(app): State<App>) -> Result<Response, ApiError> {
+    let request = hyper::Request::post(management_uri(&app, 0, "/routing/clear-counts"))
+        .body(Body::empty())
+        .expect("valid routing request");
+    send_routing_command(&app, request).await
+}
+
+async fn send_routing_command(
+    app: &App,
+    request: hyper::Request<Body>,
+) -> Result<Response, ApiError> {
+    timeout(Duration::from_secs(2), async {
+        let response = app.http.request(request).await.ok()?;
+        let (parts, body) = response.into_parts();
+        let bytes = Limited::new(body, 16_384).collect().await.ok()?.to_bytes();
+        Some(Response::from_parts(parts, Body::from(bytes)))
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "proxy management unavailable".into(),
+        )
+    })
 }
 
 async fn start_service(

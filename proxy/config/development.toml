@@ -1,6 +1,20 @@
 listen = "127.0.0.1:8080"
 management_listen = "127.0.0.1:9080"
-upstream = "http://127.0.0.1:3001"
 max_connections = 512
 upstream_timeout_ms = 5000
 shutdown_timeout_ms = 10000
+health_interval_ms = 1000
+health_timeout_ms = 500
+algorithm = "round_robin"
+
+[[upstreams]]
+id = "app-1"
+origin = "http://127.0.0.1:3001"
+
+[[upstreams]]
+id = "app-2"
+origin = "http://127.0.0.1:3002"
+
+[[upstreams]]
+id = "app-3"
+origin = "http://127.0.0.1:3003"

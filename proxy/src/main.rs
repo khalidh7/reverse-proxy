@@ -1,12 +1,14 @@
+mod control;
+mod health;
+mod load_balancer;
 mod metrics;
 mod proxy;
 mod server;
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
-use axum::{Json, Router, extract::State, routing::get};
-use hyper::Uri;
+use load_balancer::{Algorithm, LoadBalancer, UpstreamConfig};
 use serde::Deserialize;
 use tokio::{net::TcpListener, signal, sync::watch, time::timeout};
 use tracing_subscriber::EnvFilter;
@@ -16,10 +18,28 @@ use tracing_subscriber::EnvFilter;
 struct Config {
     listen: SocketAddr,
     management_listen: SocketAddr,
-    upstream: String,
+    #[serde(default)]
+    upstream: Option<String>,
+    #[serde(default)]
+    upstreams: Vec<UpstreamConfig>,
+    #[serde(default)]
+    algorithm: Algorithm,
+    #[serde(default = "health_interval")]
+    health_interval_ms: u64,
+    #[serde(default = "health_timeout")]
+    health_timeout_ms: u64,
+    #[serde(default)]
+    allow_non_loopback_management: bool,
     max_connections: usize,
     upstream_timeout_ms: u64,
     shutdown_timeout_ms: u64,
+}
+
+fn health_interval() -> u64 {
+    1000
+}
+fn health_timeout() -> u64 {
+    500
 }
 
 #[tokio::main]
@@ -33,7 +53,7 @@ async fn main() -> Result<()> {
     let config: Config =
         toml::from_str(&std::fs::read_to_string(&path).with_context(|| format!("read {path:?}"))?)?;
     ensure!(
-        config.management_listen.ip().is_loopback(),
+        config.management_listen.ip().is_loopback() || config.allow_non_loopback_management,
         "management listener must be loopback"
     );
     ensure!(
@@ -45,16 +65,24 @@ async fn main() -> Result<()> {
         "timeouts must be positive"
     );
 
-    let upstream: Uri = config.upstream.parse()?;
     ensure!(
-        upstream.scheme_str() == Some("http")
-            && upstream
-                .authority()
-                .is_some_and(|authority| !authority.as_str().contains('@'))
-            && upstream.path() == "/"
-            && upstream.query().is_none(),
-        "upstream must be an HTTP origin, for example http://127.0.0.1:3001"
+        config.health_interval_ms > 0 && config.health_timeout_ms > 0,
+        "health timings must be positive"
     );
+    let upstreams = match config.upstream {
+        Some(origin) => {
+            ensure!(
+                config.upstreams.is_empty(),
+                "configure upstream or upstreams"
+            );
+            vec![UpstreamConfig {
+                id: "app-1".into(),
+                origin,
+            }]
+        }
+        None => config.upstreams,
+    };
+    let balancer = Arc::new(LoadBalancer::new(upstreams, config.algorithm)?);
 
     let data = TcpListener::bind(config.listen)
         .await
@@ -62,22 +90,26 @@ async fn main() -> Result<()> {
     let management = TcpListener::bind(config.management_listen)
         .await
         .context("bind proxy management listener")?;
-    let proxy = proxy::Proxy::new(upstream, Duration::from_millis(config.upstream_timeout_ms));
-    let metrics = proxy.metrics.clone();
-    let management_router = Router::new()
-        .route(
-            "/metrics",
-            get(|State(metrics): State<metrics::Metrics>| async move { Json(metrics.snapshot()) }),
-        )
-        .with_state(metrics);
+    let proxy = proxy::Proxy::new(
+        balancer.clone(),
+        Duration::from_millis(config.upstream_timeout_ms),
+    );
+    let management_router = control::router(proxy.metrics.clone(), balancer.clone());
     let (shutdown, mut management_shutdown) = watch::channel(false);
     let data_shutdown = shutdown.subscribe();
+    let health_shutdown = shutdown.subscribe();
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
 
     tracing::info!(listen = %data.local_addr()?, management = %management.local_addr()?, "proxy listening");
     let mut serving = std::pin::pin!(async {
         tokio::try_join!(
             server::serve(data, proxy, config.max_connections, data_shutdown),
+            health::monitor(
+                balancer,
+                Duration::from_millis(config.health_interval_ms),
+                Duration::from_millis(config.health_timeout_ms),
+                health_shutdown
+            ),
             async {
                 axum::serve(management, management_router)
                     .with_graceful_shutdown(async move {

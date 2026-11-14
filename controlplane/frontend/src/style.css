@@ -37,3 +37,14 @@ button.primary:enabled:hover { background: #0a4c41; }
 dt { color: #536865; font-size: .8rem; }
 dd { margin: 4px 0 0; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 @media (max-width: 650px) { .columns { grid-template-columns: 1fr; } main { padding: 28px 16px; } }
+.routing { margin-bottom: 16px; }
+.routing-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 15px; }
+.routing-heading h2 { margin: 0; }
+.algorithm { max-width: 250px; }
+select { font: inherit; color: inherit; background: #fff; border: 1px solid #afc2bd; border-radius: 6px; padding: 7px 11px; }
+.table-scroll { overflow-x: auto; margin-top: 16px; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 9px 12px 9px 0; border-bottom: 1px solid #e1eae6; }
+thead th { color: #536865; font-size: .8rem; }
+tbody tr:last-child > * { border-bottom: 0; }
+input[type="checkbox"] { accent-color: #126658; }

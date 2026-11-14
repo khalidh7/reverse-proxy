@@ -1,5 +1,6 @@
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -17,20 +18,23 @@ use hyper_util::{
 };
 use tokio::time::timeout;
 
-use crate::metrics::Metrics;
+use crate::{
+    load_balancer::{ActiveRequest, LoadBalancer},
+    metrics::Metrics,
+};
 
 #[derive(Clone)]
 pub struct Proxy {
-    upstream: Uri,
+    balancer: Arc<LoadBalancer>,
     client: Client<HttpConnector, Body>,
     upstream_timeout: Duration,
     pub metrics: Metrics,
 }
 
 impl Proxy {
-    pub fn new(upstream: Uri, upstream_timeout: Duration) -> Self {
+    pub fn new(balancer: Arc<LoadBalancer>, upstream_timeout: Duration) -> Self {
         Self {
-            upstream,
+            balancer,
             client: Client::builder(TokioExecutor::new())
                 .pool_timer(TokioTimer::new())
                 .retry_canceled_requests(false)
@@ -56,9 +60,17 @@ impl Proxy {
         else {
             return error(StatusCode::BAD_REQUEST, "expected a request path");
         };
+        let Some(active) = self.balancer.select() else {
+            self.metrics.gateway_error();
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no healthy enabled upstream",
+            );
+        };
+        let upstream = &active.0.origin;
         let Ok(uri) = Uri::builder()
-            .scheme(self.upstream.scheme().unwrap().clone())
-            .authority(self.upstream.authority().unwrap().clone())
+            .scheme(upstream.scheme().unwrap().clone())
+            .authority(upstream.authority().unwrap().clone())
             .path_and_query(path.clone())
             .build()
         else {
@@ -80,14 +92,14 @@ impl Proxy {
         parts.uri = uri;
         parts.version = Version::HTTP_11;
         // Hyper independently frames each hop.
-        let request = Request::from_parts(parts, Body::new(DataOnly(body)));
+        let request = Request::from_parts(parts, Body::new(DataOnly(body, None)));
 
         match timeout(self.upstream_timeout, self.client.request(request)).await {
             Ok(Ok(response)) if response.status() != StatusCode::SWITCHING_PROTOCOLS => {
                 self.metrics.upstream_response(response.status());
                 let (mut parts, body) = response.into_parts();
                 strip_hop_headers(&mut parts.headers);
-                Response::from_parts(parts, Body::new(DataOnly(body)))
+                Response::from_parts(parts, Body::new(DataOnly(body, Some(active))))
             }
             Ok(Ok(_)) => {
                 self.metrics.gateway_error();
@@ -98,20 +110,20 @@ impl Proxy {
             }
             Ok(Err(err)) => {
                 self.metrics.gateway_error();
-                tracing::debug!(error = %err, upstream = %self.upstream, "upstream request failed");
+                tracing::debug!(error = %err, upstream = %upstream, "upstream request failed");
                 error(StatusCode::BAD_GATEWAY, "upstream request failed")
             }
             Err(_) => {
                 self.metrics.gateway_error();
-                tracing::debug!(upstream = %self.upstream, "upstream request timed out");
+                tracing::debug!(upstream = %upstream, "upstream request timed out");
                 error(StatusCode::GATEWAY_TIMEOUT, "upstream request timed out")
             }
         }
     }
 }
 
-// Phase 1 drops trailers while retaining the original body's framing hints.
-struct DataOnly(Incoming);
+// Drop trailers while retaining the original body's framing hints.
+struct DataOnly(Incoming, Option<ActiveRequest>);
 
 impl HttpBody for DataOnly {
     type Data = Bytes;
@@ -124,7 +136,13 @@ impl HttpBody for DataOnly {
         loop {
             match Pin::new(&mut self.0).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) if !frame.is_data() => continue,
-                frame => return frame,
+                result => {
+                    if matches!(result, Poll::Ready(None | Some(Err(_)))) || self.0.is_end_stream()
+                    {
+                        self.1.take();
+                    }
+                    return result;
+                }
             }
         }
     }

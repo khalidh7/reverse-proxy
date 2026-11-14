@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let listen: SocketAddr = args.next().as_deref().unwrap_or("127.0.0.1:3001").parse()?;
     let management: SocketAddr = args.next().as_deref().unwrap_or("127.0.0.1:9301").parse()?;
     ensure!(
-        management.ip().is_loopback(),
+        management.ip().is_loopback() || std::env::var_os("LAB_CONTAINER").is_some(),
         "management listener must be loopback"
     );
     ensure!(
